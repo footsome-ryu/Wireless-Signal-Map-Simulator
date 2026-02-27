@@ -11,18 +11,10 @@ FREQUENCY_MHZ = 447
 FLOOR_HEIGHT_M = 4.0
 
 def calculate_indoor_path_loss(distance_m):
-    """
-    실내 환경을 고려한 Log-Distance Path Loss 모델.
-    자유공간보다 거리에 따른 감쇄 폭이 훨씬 큼.
-    """
     if distance_m <= 1.0: 
-        # 1m 이내 근접 거리는 기본 자유공간 공식 적용
         return 20 * np.log10(1.0) + 20 * np.log10(FREQUENCY_MHZ) - 27.55
-    
-    # 실내 환경 감쇄 계수 (n=3.0 ~ 3.5 적용)
-    # 일반적인 사무실/건물 내부는 n=3.0 이상일 때 거리에 따른 감쇄가 뚜렷함
     n = 3.2 
-    reference_loss = 20 * np.log10(FREQUENCY_MHZ) - 27.55 # 1m 기준 손실
+    reference_loss = 20 * np.log10(FREQUENCY_MHZ) - 27.55
     return reference_loss + 10 * n * np.log10(distance_m)
 
 def count_walls_fast(start_pt, end_pt, wall_mask, step=10):
@@ -44,6 +36,15 @@ st.set_page_config(layout="wide", page_title="Wireless Signal Map Simulator")
 st.markdown("""
     <style>
     section[data-testid="stSidebar"] { width: 320px !important; }
+    .floor-stats {
+        background-color: #f0f2f6;
+        padding: 5px 15px;
+        border-radius: 10px;
+        display: inline-block;
+        margin-left: 20px;
+        font-size: 0.9rem;
+        color: #31333F;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -52,7 +53,7 @@ st.title("🏢 Wireless Signal Map Simulator")
 if 'devices' not in st.session_state: st.session_state.devices = []
 if 'last_click' not in st.session_state: st.session_state.last_click = {}
 
-# --- 3. Sidebar (Controls placed right above Spectrum) ---
+# --- 3. Sidebar ---
 st.sidebar.header("⚙️ Settings")
 tx_eff = st.sidebar.slider("TX Power (dBm)", -10, 20, 0)
 rp_eff = st.sidebar.slider("RP Power (dBm)", 0, 40, 10)
@@ -64,7 +65,6 @@ wall_loss_sens = st.sidebar.slider("Wall Loss Sens.", 0, 20, 5)
 map_width_m = st.sidebar.number_input("Map Width (m)", value=50.0)
 
 st.sidebar.write("---")
-# 요청사항: Controls 항목을 스펙트럼 바로 위에 배치
 st.sidebar.subheader("🕹️ Controls")
 mode = st.sidebar.radio("Action Mode:", ["Add TX", "Add RP", "Add RX", "Remove"])
 if st.sidebar.button("Clear All Devices"):
@@ -86,6 +86,15 @@ ax_leg.text(0.5, (rx_sens - 15 + required_rssi)/2, "FAIL ZONE", color='white', h
 ax_leg.axhline(required_rssi, color='red', linestyle='--', linewidth=1.5)
 st.sidebar.pyplot(fig_leg)
 
+# 사이드바 최하단에 전체 수량 요약 추가
+if st.session_state.devices:
+    st.sidebar.write("---")
+    st.sidebar.subheader("📦 Total Device Count")
+    all_tx = sum(1 for d in st.session_state.devices if d['type'] == 'TX')
+    all_rp = sum(1 for d in st.session_state.devices if d['type'] == 'RP')
+    all_rx = sum(1 for d in st.session_state.devices if d['type'] == 'RX')
+    st.sidebar.info(f"TX: {all_tx} | RP: {all_rp} | RX: {all_rx}")
+
 # --- 4. Main Display ---
 uploaded_files = st.file_uploader("Upload Floor Plans", type=['png', 'jpg'], accept_multiple_files=True)
 
@@ -104,7 +113,19 @@ if uploaded_files:
 
     for f_idx in range(len(floor_images)):
         st.divider()
-        st.subheader(f"🏢 {floor_names[f_idx]}")
+        
+        # --- 층별 장치 수량 카운트 및 표시 ---
+        f_tx = sum(1 for d in st.session_state.devices if d['floor_idx'] == f_idx and d['type'] == 'TX')
+        f_rp = sum(1 for d in st.session_state.devices if d['floor_idx'] == f_idx and d['type'] == 'RP')
+        f_rx = sum(1 for d in st.session_state.devices if d['floor_idx'] == f_idx and d['type'] == 'RX')
+        
+        # 제목 옆에 수량 뱃지 표시
+        col_title, col_stats = st.columns([0.4, 0.6])
+        with col_title:
+            st.subheader(f"🏢 {floor_names[f_idx]}")
+        with col_stats:
+            st.markdown(f"""<div style='padding-top:15px;'><span class='floor-stats'>
+                <b>Devices:</b> TX({f_tx}) RP({f_rp}) RX({f_rx})</span></div>""", unsafe_allow_html=True)
         
         img_w, img_h = floor_images[f_idx].size
         px_to_m = map_width_m / img_w 
@@ -127,9 +148,7 @@ if uploaded_files:
                         total_dist_m = np.sqrt(h_dist_m**2 + v_dist_m**2)
                         
                         pwr = tx_eff if s['type'] == 'TX' else rp_eff
-                        # 수정된 실내 전파 감쇄 모델 적용
                         rssi = pwr - calculate_indoor_path_loss(total_dist_m)
-                        
                         rssi -= (abs(f_idx - s['floor_idx']) * slab_loss_db)
                         nw = count_walls_fast((s['x'], s['y']), (x, y), floor_masks[f_idx])
                         rssi -= (nw * wall_loss_sens)
@@ -177,7 +196,6 @@ if uploaded_files:
                 h_d = np.sqrt(dx**2 + dy**2)
                 v_d = abs(rx['floor_idx'] - s['floor_idx']) * FLOOR_HEIGHT_M
                 t_d = np.sqrt(h_d**2 + v_d**2)
-                # 수치 분석 리포트에도 실내 모델 적용
                 r = (tx_eff if s['type'] == 'TX' else rp_eff) - calculate_indoor_path_loss(t_d)
                 r -= (abs(rx['floor_idx'] - s['floor_idx']) * slab_loss_db)
                 r -= (count_walls_fast((s['x'], s['y']), (rx['x'], rx['y']), floor_masks[rx['floor_idx']]) * wall_loss_sens)
